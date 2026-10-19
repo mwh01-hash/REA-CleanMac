@@ -1,7 +1,7 @@
 # REA install plan (macOS)
 
 Plan for installing **REA – Reverse Engineer Anything** on a Mac, based on a
-source review done on 2026-10-16.
+source review done on 2026-10-16. iOS notes were added on 2026-10-19.
 
 | | |
 |---|---|
@@ -39,6 +39,9 @@ Rules for the agent:
    - JavaScript/Electron, .NET, app bundles: no engine needed.
    - Native binaries: Hopper (commercial; free demo) or Ghidra 12.1.x + JDK 21.
    - Android APK resources: Apktool **≥ 2.9.2**.
+   - iPhone/iPad apps: Hopper or Ghidra, plus full Xcode. See
+     [iOS and iPadOS apps](#ios-and-ipados-apps). Only the user's own builds
+     or authorized builds are suitable; App Store apps are encrypted.
 4. **Chip.** Apple Silicon or Intel. This matters for the Ghidra decompiler.
 
 ## Step 1 – Pre-flight (read-only)
@@ -153,6 +156,9 @@ Use `--skill=false` if the user doesn't want the bundled skill installed.
 
 ## Step 5 – Engine prep (only what step 0 requires)
 
+If step 0 includes iPhone/iPad apps, also do the
+[iOS prerequisites](#ios-prerequisites) during this step.
+
 **Hopper.**
 - If Hopper is already installed, setup reuses it. **Don't pass
   `--install-hopper`**: it replaces `~/Applications/Hopper Disassembler.app`
@@ -245,6 +251,122 @@ files hold no account data.
   JavaScript/Electron project or app the user owns:
   `rea analyze-javascript-application /absolute/path --json`.
 
+## iOS and iPadOS apps
+
+Use this section only if step 0 includes iPhone/iPad apps.
+
+### What works and what doesn't
+
+**Works.** Static analysis on the Mac of `.ipa` files and iOS `.app` bundles:
+
+| What | Command |
+|---|---|
+| File inventory, hashes, bundle layout, embedded frameworks (React Native/Hermes/Flutter/Unity hints) | `inspect-artifact` |
+| Rebuild the app's structure from `inventory_artifact` Evidence (MCP tool; `inspect-artifact` output isn't the input) | `project-apple-application-graph` |
+| `Info.plist` | `inspect-plist` |
+| Compiled storyboards and nibs (screens, outlets, actions, class names) | `decode-interface-builder` |
+| Asset catalogs | `inspect-asset-catalog` |
+| Keyed archives | `inspect-keyed-archive` |
+| Mach-O headers | `inspect-macho` |
+| `@rpath` and dylib resolution | `trace-dylib-resolution` |
+| The arm64 executable, via Hopper or Ghidra | `analyze`, `function`, `decompile`, `xrefs`, `search` |
+
+**Doesn't work: App Store apps.**
+- Apple encrypts the executable code of every App Store app (FairPlay), free
+  ones included.
+- Plists, resources and storyboards stay readable, but the disassembler sees
+  only encrypted bytes.
+- REA doesn't check for this (finding L1), so always run the
+  [encryption check](#encryption-check) first.
+- **Don't decrypt.** Obtaining a decrypted copy circumvents Apple's DRM. That
+  is outside what REA's `DISCLAIMER.md` authorizes and may be illegal. The
+  agent must not help obtain decrypted binaries.
+
+**Doesn't work: analysis on the device itself.**
+- REA has no iPhone tooling to match its Android ADB tools.
+- Its Frida tools can connect to a Frida server at `host:port`, but REA doesn't
+  install one. On an iPhone that requires a jailbreak, or Frida Gadget built
+  into an app the user compiles themselves.
+- On-device analysis is out of scope for this plan.
+
+### Suitable targets
+
+- **The user's own Xcode builds.** Look under
+  `~/Library/Developer/Xcode/DerivedData/<Project>-<hash>/Build/Products/`,
+  for example `Debug-iphoneos/<App>.app` or `Debug-iphonesimulator/<App>.app`.
+- **Development or Ad Hoc `.ipa` exports** from Xcode's Organizer.
+- **Builds the user is explicitly authorized to analyze**, such as a client's
+  test build.
+
+### iOS prerequisites
+
+1. **Full Xcode.** The Command Line Tools alone can't decode storyboards. Check:
+
+   ```bash
+   xcode-select -p
+   xcodebuild -version
+   xcodebuild -showsdks
+   ```
+
+   - If `xcode-select -p` shows `/Library/Developer/CommandLineTools`, the
+     **user** switches it after installing Xcode. The agent never uses sudo.
+
+     ```bash
+     sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+     ```
+
+   - On a fresh Xcode, the **user** opens Xcode once to accept the license and
+     install its components.
+   - If `xcodebuild -showsdks` lists no `iphoneos` SDK, install the iOS
+     platform. It's a multi-GB download, so confirm with the user first.
+
+     ```bash
+     xcodebuild -downloadPlatform iOS
+     ```
+
+2. **An engine for the executable.** iOS executables are arm64 Mach-O, so
+   Hopper or Ghidra from step 5 is needed. On Apple Silicon, Ghidra needs the
+   arm64 decompiler build.
+
+### Encryption check
+
+Run this before any native analysis. For an `.ipa`, extract it into its own
+new folder first:
+
+```bash
+mkdir -p ~/rea-targets/MyApp
+ditto -x -k /absolute/path/to/MyApp.ipa ~/rea-targets/MyApp
+```
+
+The `.app` is then at `~/rea-targets/MyApp/Payload/<Name>.app`. Next:
+
+```bash
+APP="/absolute/path/to/MyApp.app"
+EXE="$APP/$(plutil -extract CFBundleExecutable raw "$APP/Info.plist")"
+otool -l "$EXE" | grep -A4 LC_ENCRYPTION_INFO
+```
+
+- `cryptid 1`: the executable is encrypted. Stop native analysis and analyze
+  only resources, plists and storyboards.
+- `cryptid 0`, or no output: the code is readable.
+
+### First iOS test (after step 7)
+
+Run `rea <command> --help` before first use of each command to confirm its
+arguments. Use one of the user's own builds:
+
+```bash
+rea inspect-artifact "$APP" --json
+rea decode-interface-builder "$APP"
+rea inspect-asset-catalog "$APP"
+rea trace-dylib-resolution "$APP"
+rea analyze "$EXE" --provider ghidra --json
+```
+
+Use `--provider hopper` if Hopper is the engine. Over MCP, call
+`decode_interface_builder` with `detail: "summary"`, because a full app graph
+can run to several MB.
+
 ## Safe use afterwards
 
 - Don't always-allow REA tools in any agent. Several are effectively shell or
@@ -280,6 +402,7 @@ Locations refer to `morluto/rea` at tag `rea-agents-6.5.0`.
 | S5 | Re-running setup rebuilds the `rea` entry and keeps only `env`, so custom keys (e.g. Codex `enabled = false`) are dropped. | Low | `ClientConfigurationDocument.ts:1437-1512` |
 | S6 | An empty `CLAUDE_CONFIG_DIR` is treated as a relative path (`??` instead of `\|\|`). | Low | `SupportedClients.ts:162, 165, 490` |
 | R1 | Apktool floor is 2.7.0, but Apktool ≤ 2.9.1 has CVE-2024-21633 (crafted resource names write arbitrary files). Still unfixed on `main` as of 2026-10-16. | Medium (when an old Apktool is in use) | `src/apktool/ApktoolConfiguration.ts:217-223`; `docs/apktool-resource-analysis.md:11` |
+| L1 | No FairPlay detection. Nothing in `src/` reads `LC_ENCRYPTION_INFO`/`cryptid`; the Mach-O slice entry's `encrypted` field is hardcoded `false`. Encrypted App Store executables are passed to the engine with no warning. | Limitation | `src/artifacts/MachOSliceArtifactReader.ts:186` |
 
 **Checked and fine:**
 - Setup follows symlinked dotfiles only when the link and its target are owned by you, and it keeps the link.
